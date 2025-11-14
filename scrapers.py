@@ -1,335 +1,288 @@
 # scrapers.py
-# ---------------------------------------------------------
-# This file collects ALL scrapers (Govt + Corporate + News)
-# Each scraper returns a list of dicts:
-# { "title": "...", "url": "...", "deadline": "YYYY-MM-DD" or None }
-# ---------------------------------------------------------
+# Rewritten scrapers using RSS / JSON / static HTML endpoints only
+# Returns for each site a list of dicts: { "title": "...", "url": "..." }
+# Defensive, best-effort, no JS rendering
 
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
-import re
+from urllib.parse import urljoin
+import json
+import time
 
-HEADERS = {"User-Agent": "Mozilla/5.0 HackFinder/6.0"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; HackFinder/1.0)"}
+REQUEST_TIMEOUT = 15
 
-# ---------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------
-
-def fetch_html(url):
+def fetch_text(url):
     try:
-        return requests.get(url, headers=HEADERS, timeout=15).text
-    except:
+        r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        return r.text
+    except Exception as e:
+        print(f"[fetch_text] failed {url} -> {e}")
         return ""
 
-def clean(text):
-    if not text:
-        return ""
-    text = text.replace("\n", " ").strip()
-    text = " ".join(text.split())
-    return text
-
-def extract_deadline_from_text(text):
-    """
-    Try to extract a date in formats like:
-    - 12 Jan 2025
-    - Jan 12, 2025
-    - 2025-01-22
-    - 01/12/2025
-    If nothing found -> return None
-    """
-    if not text:
+def fetch_json(url):
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"[fetch_json] failed {url} -> {e}")
         return None
 
-    patterns = [
-        r"(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})",  # 12 Jan 2025
-        r"([A-Za-z]{3,9}\s+\d{1,2},\s*\d{4})", # Jan 12, 2025
-        r"(\d{4}-\d{2}-\d{2})",                # 2025-01-22
-        r"(\d{1,2}/\d{1,2}/\d{4})"             # 01/12/2025
-    ]
-
-    for p in patterns:
-        m = re.search(p, text)
-        if m:
-            date_str = m.group(1)
-            try:
-                return str(parse_any_date(date_str))
-            except:
-                pass
-
-    return None
-
-def parse_any_date(s):
+def parse_rss(url, limit=40):
     """
-    Try multiple formats until one matches.
-    Returns a datetime.date object.
+    Generic RSS/Atom parser. Returns list of (title, link)
     """
-    fmts = [
-        "%d %b %Y",
-        "%d %B %Y",
-        "%b %d, %Y",
-        "%B %d, %Y",
-        "%Y-%m-%d",
-        "%d/%m/%Y",
-        "%m/%d/%Y"
-    ]
-    for f in fmts:
-        try:
-            return datetime.strptime(s, f).date()
-        except:
-            pass
-    raise ValueError("Unknown date format: " + s)
+    text = fetch_text(url)
+    if not text:
+        return []
 
+    soup = BeautifulSoup(text, "xml")
+    items = []
 
-# ---------------------------------------------------------
-# SCRAPER TEMPLATE
-# ---------------------------------------------------------
+    # Try <item> (RSS)
+    for node in soup.find_all("item")[:limit]:
+        title_node = node.find("title")
+        link_node = node.find("link")
+        title = title_node.get_text(strip=True) if title_node else None
+        link = link_node.get_text(strip=True) if link_node else None
+        if title:
+            items.append((title, link or url))
 
-def make_item(title, url, deadline=None):
-    return {
-        "title": clean(title),
-        "url": url,
-        "deadline": deadline
-    }
+    # If none, try Atom <entry>
+    if not items:
+        for node in soup.find_all("entry")[:limit]:
+            title_node = node.find("title")
+            link_node = node.find("link")
+            title = title_node.get_text(strip=True) if title_node else None
+            link = None
+            if link_node and link_node.has_attr("href"):
+                link = link_node["href"]
+            if title:
+                items.append((title, link or url))
 
-# ---------------------------------------------------------
-# A) GOVERNMENT SOURCES
-# ---------------------------------------------------------
+    return items
 
-# ---- MyGov ----
+def unique_items(items):
+    seen = set()
+    out = []
+    for t, u in items:
+        key = (t.strip(), (u or "").strip())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"title": t.strip(), "url": (u or "").strip()})
+    return out
+
+# -----------------------------
+# Government / official RSS
+# -----------------------------
+
 def scrape_mygov():
-    url = "https://www.mygov.in/homepage/"
-    html = fetch_html(url)
-    soup = BeautifulSoup(html, "lxml")
+    # MyGov challenges feed
+    url = "https://www.mygov.in/challenges/feed/"
+    items = parse_rss(url)
+    return unique_items(items)
 
-    items = []
-    for a in soup.select("a"):
-        t = clean(a.get_text())
-        if "challenge" in t.lower() or "hackathon" in t.lower():
-            items.append(make_item(t, a.get("href", "")))
-    return items
-
-
-# ---- MeitY ----
-def scrape_meity():
-    url = "https://www.meity.gov.in/press-releases"
-    html = fetch_html(url)
-    soup = BeautifulSoup(html, "lxml")
-
-    items = []
-    for a in soup.select("a"):
-        t = clean(a.get_text())
-        if any(k in t.lower() for k in ["challenge", "hackathon", "innovation"]):
-            items.append(make_item(t, "https://www.meity.gov.in" + a.get("href", "")))
-    return items
-
-
-# ---- Digital India ----
 def scrape_digital_india():
-    url = "https://www.digitalindia.gov.in/news"
-    html = fetch_html(url)
-    soup = BeautifulSoup(html, "lxml")
+    url = "https://www.digitalindia.gov.in/rss.xml"
+    items = parse_rss(url)
+    return unique_items(items)
 
-    items = []
-    for a in soup.select("a"):
-        t = clean(a.get_text())
-        if "hackathon" in t.lower():
-            items.append(make_item(t, "https://www.digitalindia.gov.in" + a.get("href", "")))
-    return items
-
-
-# ---- RBI Press ----
-def scrape_rbi():
-    url = "https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx"
-    html = fetch_html(url)
-    soup = BeautifulSoup(html, "lxml")
-
-    items = []
-    for a in soup.select("a"):
-        t = clean(a.get_text())
-        if "harbinger" in t.lower() or "hackathon" in t.lower():
-            items.append(make_item(t, "https://www.rbi.org.in" + a.get("href", "")))
-    return items
-
-
-# ---- ISRO ----
 def scrape_isro():
-    url = "https://www.isro.gov.in/Updates.html"
-    html = fetch_html(url)
-    soup = BeautifulSoup(html, "lxml")
+    url = "https://www.isro.gov.in/press-release/feed"
+    items = parse_rss(url)
+    return unique_items(items)
 
-    items = []
+def scrape_rbi():
+    # RBI press release RSS
+    url = "https://www.rbi.org.in/scripts/BS_PressReleaseRSS.xml"
+    items = parse_rss(url)
+    return unique_items(items)
+
+def scrape_meity():
+    # fallback to press releases listing (static HTML)
+    base = "https://www.meity.gov.in"
+    url = f"{base}/press-releases"
+    text = fetch_text(url)
+    if not text:
+        return []
+    soup = BeautifulSoup(text, "lxml")
+    found = []
     for a in soup.select("a"):
-        t = clean(a.get_text())
-        if any(k in t.lower() for k in ["hackathon", "challenge"]):
-            items.append(make_item(t, "https://www.isro.gov.in" + a.get("href", "")))
-    return items
+        t = a.get_text(" ", strip=True)
+        href = a.get("href", "")
+        if not t:
+            continue
+        low = t.lower()
+        if any(k in low for k in ("hackathon", "challenge", "innovation", "competition", "contest")):
+            link = urljoin(base, href)
+            found.append((t, link))
+    return unique_items(found)
 
-
-# ---- NIC ----
 def scrape_nic():
     url = "https://www.nic.in/news/"
-    html = fetch_html(url)
-    soup = BeautifulSoup(html, "lxml")
+    text = fetch_text(url)
+    if not text:
+        return []
+    soup = BeautifulSoup(text, "lxml")
+    found = []
+    for tag in soup.select("h2, h3, a"):
+        t = tag.get_text(" ", strip=True)
+        if not t:
+            continue
+        low = t.lower()
+        if any(k in low for k in ("hackathon", "challenge", "competition", "contest")):
+            href = tag.get("href") or ""
+            link = urljoin("https://www.nic.in", href) if href else "https://www.nic.in/news/"
+            found.append((t, link))
+    return unique_items(found)
 
-    items = []
-    for h in soup.select("h2, h3"):
-        t = clean(h.get_text())
-        if "challenge" in t.lower() or "hackathon" in t.lower():
-            items.append(make_item(t, url))
-    return items
+# -----------------------------
+# Corporate / Tech (RSS / JSON / static)
+# -----------------------------
 
-
-# ---------------------------------------------------------
-# B) CORPORATE / TECH
-# ---------------------------------------------------------
-
-# ---- NVIDIA ----
 def scrape_nvidia():
-    url = "https://developer.nvidia.com/community/events"
-    html = fetch_html(url)
-    soup = BeautifulSoup(html, "lxml")
-
+    # Try JSON endpoint first (best-effort)
+    json_url = "https://developer.nvidia.com/events.json"
+    data = fetch_json(json_url)
     items = []
-    for h in soup.select("h3, h2"):
-        t = clean(h.get_text())
-        if "challenge" in t.lower() or "hackathon" in t.lower():
-            items.append(make_item(t, url))
-    return items
+    if data and isinstance(data, dict):
+        # try common keys
+        events = data.get("events") or data.get("data") or data.get("items") or []
+        for ev in events[:40]:
+            title = ev.get("title") or ev.get("name") or ev.get("headline") or None
+            link = ev.get("url") or ev.get("link") or ev.get("href") or None
+            if title:
+                if link and link.startswith("/"):
+                    link = urljoin("https://developer.nvidia.com", link)
+                items.append((title, link))
+    # fallback to simple page scrape
+    if not items:
+        page = fetch_text("https://developer.nvidia.com/community/events")
+        soup = BeautifulSoup(page, "lxml")
+        for h in soup.select("h3, h2, .event-title, .views-field-title a")[:40]:
+            title = h.get_text(" ", strip=True)
+            href = h.get("href") or ""
+            link = href if href.startswith("http") else urljoin("https://developer.nvidia.com", href)
+            if title:
+                items.append((title, link))
+    return unique_items(items)
 
-
-# ---- Meta ----
 def scrape_meta():
-    url = "https://developers.facebook.com/blog/"
-    html = fetch_html(url)
-    soup = BeautifulSoup(html, "lxml")
+    # Facebook dev blog RSS
+    url = "https://developers.facebook.com/blog/feed"
+    items = parse_rss(url)
+    return unique_items(items)
 
-    items = []
-    for h in soup.select("h2"):
-        t = clean(h.get_text())
-        if "challenge" in t.lower() or "hackathon" in t.lower():
-            items.append(make_item(t, url))
-    return items
-
-
-# ---- Google Developer ----
 def scrape_google_dev():
-    url = "https://developers.google.com/events"
-    html = fetch_html(url)
-    soup = BeautifulSoup(html, "lxml")
+    # Google Developers events RSS
+    url = "https://developers.google.com/events/rss.xml"
+    items = parse_rss(url)
+    return unique_items(items)
 
-    items = []
-    for a in soup.select("a"):
-        t = clean(a.get_text())
-        if any(k in t.lower() for k in ["challenge", "hackathon"]):
-            items.append(make_item(t, "https://developers.google.com" + a.get("href", "")))
-    return items
-
-
-# ---- Microsoft ----
 def scrape_microsoft():
-    url = "https://developer.microsoft.com/en-us/events/"
-    html = fetch_html(url)
-    soup = BeautifulSoup(html, "lxml")
+    # Techcommunity RSS (best-effort)
+    url = "https://techcommunity.microsoft.com/gxcuf89792/rss/board?board_id=DeveloperCommunity"
+    items = parse_rss(url)
+    return unique_items(items)
 
-    items = []
-    for h in soup.select("h3, h2"):
-        t = clean(h.get_text())
-        if "challenge" in t.lower() or "hackathon" in t.lower():
-            items.append(make_item(t, url))
-    return items
-
-
-# ---- Apple ----
 def scrape_apple():
-    url = "https://developer.apple.com/news/"
-    html = fetch_html(url)
-    soup = BeautifulSoup(html, "lxml")
+    url = "https://developer.apple.com/news/releases/rss/releases.rss"
+    items = parse_rss(url)
+    return unique_items(items)
 
-    items = []
-    for h in soup.select("h2, h3"):
-        t = clean(h.get_text())
-        if "challenge" in t.lower():
-            items.append(make_item(t, url))
-    return items
-
-
-# ---- AWS ----
 def scrape_aws():
-    url = "https://aws.amazon.com/events/"
-    html = fetch_html(url)
-    soup = BeautifulSoup(html, "lxml")
+    url = "https://aws.amazon.com/events/feed/"
+    items = parse_rss(url)
+    return unique_items(items)
 
-    items = []
-    for h in soup.select("h2, h3"):
-        t = clean(h.get_text())
-        if any(k in t.lower() for k in ["challenge", "hackathon"]):
-            items.append(make_item(t, url))
-    return items
+# -----------------------------
+# Platforms and competitions
+# -----------------------------
 
-
-# ---- Kaggle ----
 def scrape_kaggle():
-    url = "https://www.kaggle.com/competitions"
-    html = fetch_html(url)
-    soup = BeautifulSoup(html, "lxml")
+    # Kaggle competitions page: collect links with /c/ prefix
+    base = "https://www.kaggle.com"
+    url = f"{base}/competitions"
+    text = fetch_text(url)
+    if not text:
+        return []
+    soup = BeautifulSoup(text, "lxml")
+    found = []
+    # look for anchors with /c/
+    for a in soup.select("a[href*='/c/']")[:60]:
+        t = a.get_text(" ", strip=True)
+        href = a.get("href")
+        if t and href:
+            link = urljoin(base, href)
+            found.append((t, link))
+    return unique_items(found)
 
-    items = []
-    for link in soup.select("a.sc-bYoBruce"):
-        t = clean(link.get_text())
-        if t:
-            items.append(make_item(t, "https://www.kaggle.com" + link.get("href", "")))
-    return items
-
-
-# ---- AIcrowd ----
 def scrape_aicrowd():
-    url = "https://www.aicrowd.com/challenges"
-    html = fetch_html(url)
-    soup = BeautifulSoup(html, "lxml")
-
+    # try JSON challenges feed
+    json_url = "https://www.aicrowd.com/challenges.json"
+    data = fetch_json(json_url)
     items = []
-    for a in soup.select("a.challenge-list-item__link"):
-        t = clean(a.get("title", ""))
-        if t:
-            items.append(make_item(t, "https://www.aicrowd.com" + a.get("href", "")))
-    return items
+    if data and isinstance(data, dict):
+        challenges = data.get("challenges") or data.get("data") or []
+        for ch in challenges[:60]:
+            title = ch.get("title") or ch.get("name") or None
+            link = ch.get("url") or ch.get("permalink") or None
+            if title:
+                if link and link.startswith("/"):
+                    link = urljoin("https://www.aicrowd.com", link)
+                items.append((title, link))
+    # fallback: basic HTML
+    if not items:
+        page = fetch_text("https://www.aicrowd.com/challenges")
+        soup = BeautifulSoup(page, "lxml")
+        for a in soup.select("a[href*='/challenges/']")[:60]:
+            t = a.get("title") or a.get_text(" ", strip=True)
+            href = a.get("href")
+            link = urljoin("https://www.aicrowd.com", href)
+            if t:
+                items.append((t, link))
+    return unique_items(items)
 
-
-# ---- Devfolio ----
 def scrape_devfolio():
-    url = "https://devfolio.co/hackathons"
-    html = fetch_html(url)
-    soup = BeautifulSoup(html, "lxml")
-
+    # Devfolio API endpoint
+    json_url = "https://devfolio.co/api/hackathons"
+    data = fetch_json(json_url)
     items = []
-    for h in soup.select("h3"):
-        t = clean(h.get_text())
-        if "hackathon" in t.lower():
-            items.append(make_item(t, url))
-    return items
+    if data and isinstance(data, dict):
+        list_h = data.get("data") or data.get("hackathons") or data.get("hackathon") or []
+        for h in list_h[:60]:
+            title = h.get("title") or h.get("name") or None
+            link = h.get("url") or h.get("external_url") or None
+            if title:
+                if link and link.startswith("/"):
+                    link = urljoin("https://devfolio.co", link)
+                items.append((title, link))
+    # fallback HTML
+    if not items:
+        page = fetch_text("https://devfolio.co/hackathons")
+        soup = BeautifulSoup(page, "lxml")
+        for h in soup.select("h3, a"):
+            t = h.get_text(" ", strip=True)
+            href = h.get("href") or ""
+            if t and "hackathon" in t.lower():
+                items.append((t, urljoin("https://devfolio.co", href)))
+    return unique_items(items)
 
-
-# ---------------------------------------------------------
-# C) Google News
-# ---------------------------------------------------------
+# -----------------------------
+# News (Google News RSS)
+# -----------------------------
 
 def scrape_google_news():
-    url = "https://news.google.com/search?q=hackathon&hl=en-IN&gl=IN&ceid=IN:en"
-    html = fetch_html(url)
-    soup = BeautifulSoup(html, "lxml")
+    url = "https://news.google.com/rss/search?q=hackathon"
+    items = parse_rss(url)
+    return unique_items(items)
 
-    items = []
-    for h in soup.select("h3"):
-        t = clean(h.get_text())
-        if "hackathon" in t.lower() or "challenge" in t.lower():
-            items.append(make_item(t, url))
-    return items
-
-
-# ---------------------------------------------------------
-# MASTER SCRAPER
-# ---------------------------------------------------------
+# -----------------------------
+# Master mapping
+# -----------------------------
 
 SITES_INFO = {
     "mygov": scrape_mygov,
@@ -350,14 +303,25 @@ SITES_INFO = {
     "google_news": scrape_google_news,
 }
 
-
 def scrape_all():
-    all_results = {}
+    results = {}
     for name, fn in SITES_INFO.items():
         try:
-            items = fn()
-        except Exception as ex:
-            print(f"[ERROR] scraper {name} → {ex}")
-            items = []
-        all_results[name] = items
-    return all_results
+            data = fn() or []
+        except Exception as e:
+            print(f"[scrape_all] error in {name}: {e}")
+            data = []
+        # ensure list of dicts with title/url
+        cleaned = []
+        for it in data:
+            if not isinstance(it, dict):
+                # already (title, url) tuple handling by unique_items, but safety
+                continue
+            title = it.get("title") or ""
+            url = it.get("url") or ""
+            if title:
+                cleaned.append({"title": title, "url": url})
+        results[name] = cleaned
+        # small sleep to be polite to sites when running locally
+        time.sleep(0.2)
+    return results
