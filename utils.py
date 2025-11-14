@@ -1,14 +1,10 @@
 # utils.py
 # ---------------------------------------------------------
 # Utility functions for Hackathon Finder Bot
-# Handles:
-# - JSON load/save
-# - Deadline filtering (active/upcoming only)
-# - Formatting pretty Telegram messages (HTML)
+# Minimal filtering, no deadline checks
 # ---------------------------------------------------------
 
 import json
-from datetime import datetime, date
 from pathlib import Path
 
 # ---------------------------------------------------------
@@ -27,90 +23,90 @@ def load_json(path: Path):
     except:
         return {}
 
-
 # ---------------------------------------------------------
-# DEADLINE FILTERING
+# LIGHT FILTERING (NO DEADLINE LOGIC)
 # ---------------------------------------------------------
 
-def parse_deadline_str(s):
-    """
-    Convert a string YYYY-MM-DD into date object.
-    If invalid, return None.
-    """
-    try:
-        return datetime.strptime(s, "%Y-%m-%d").date()
-    except:
-        return None
+GOOD_WORDS = [
+    "hack",
+    "challenge",
+    "competition",
+    "contest",
+    "innovation",
+    "fellowship",
+    "student challenge",
+]
 
-def filter_by_deadline(results):
+BAD_WORDS = [
+    "webinar",
+    "bootcamp",
+    "workshop",
+    "seminar",
+    "summit",
+    "training",
+    "winner announcement",
+    "announcement",
+]
+
+def pass_filter(title: str):
+    t = title.lower()
+
+    # remove obvious noise
+    for bad in BAD_WORDS:
+        if bad in t:
+            return False
+
+    # keep if any good word is in it
+    for good in GOOD_WORDS:
+        if good in t:
+            return True
+
+    return False
+
+
+def filter_by_light_rules(results):
     """
     Input:
     {
-        site1: [ {title, url, deadline}, ... ],
-        site2: [ ... ]
+        site: [{title, url}, ...]
     }
 
     Output:
-    Only items where:
-        - deadline is None (unknown → keep),
-        - or deadline >= TODAY
+    Only relevant items, no deadline requirements.
     """
-    today = date.today()
-
     filtered = {}
 
     for site, items in results.items():
-        good_items = []
+        clean = []
         for it in items:
-            d = it.get("deadline")
-
-            if not d:
-                # No deadline found → keep anyway
-                good_items.append(it)
+            title = it.get("title", "")
+            if not title:
                 continue
 
-            deadline = parse_deadline_str(d)
-            if deadline and deadline >= today:
-                good_items.append(it)
+            if pass_filter(title):
+                clean.append(it)
 
-        filtered[site] = good_items
+        filtered[site] = clean
 
     return filtered
 
 
 # ---------------------------------------------------------
-# MESSAGE FORMATTING (TELEGRAM)
+# MESSAGE FORMATTING
 # ---------------------------------------------------------
 
 def format_item_html(item):
-    """
-    Convert single item dict -> HTML line
-    Example:
-        • <a href='URL'>TITLE</a> (deadline: YYYY-MM-DD)
-    """
     title = item.get("title", "Untitled")
-    url = item.get("url", "")
-    deadline = item.get("deadline", None)
+    url = item.get("url")
 
-    line = f"• <a href=\"{url}\">{title}</a>"
-    if deadline:
-        line += f" <b>(Deadline: {deadline})</b>"
-    return line
+    if url:
+        return f"• <a href=\"{url}\">{title}</a>"
+    else:
+        return f"• {title}"
 
 
 def format_message(results):
-    """
-    Convert the entire results dictionary into an HTML Telegram message.
-
-    Input:
-    {
-        "devpost": [ {...}, {...} ],
-        "hackerearth": [ {...} ],
-        ...
-    }
-    """
-
-    msg = "🔥 <b>Latest Hackathons & Challenges</b>\n\n"
+    msg = "🔥 <b>Latest Hackathons and Challenges</b>\n\n"
 
     empty = True
 
@@ -121,12 +117,12 @@ def format_message(results):
         empty = False
         msg += f"⭐ <b>{site.upper()}</b>\n"
 
-        for it in items[:10]:  # show top 10 per site
+        for it in items[:10]:
             msg += format_item_html(it) + "\n"
 
         msg += "\n"
 
     if empty:
-        return "😴 No active or upcoming hackathons found right now."
+        return "😴 No relevant hackathons found right now."
 
     return msg.strip()
