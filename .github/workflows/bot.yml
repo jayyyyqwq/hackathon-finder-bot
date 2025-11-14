@@ -1,0 +1,30 @@
+name: HackathonFinderBot
+
+on:
+  workflow_dispatch:
+  push:
+  schedule:
+    - cron: "0 * * * *"   # Restart hourly to keep bot alive
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run bot
+        env:
+          HF_BOT_TOKEN: ${{ secrets.HF_BOT_TOKEN }}
+          HF_CHAT_ID: ${{ secrets.HF_CHAT_ID }}
+        run: |
+          python bot.py
